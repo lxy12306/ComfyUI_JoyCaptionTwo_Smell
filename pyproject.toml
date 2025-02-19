@@ -1,0 +1,14 @@
+[project]
+name = "comfyui_slk_joy_caption_two"
+description = "NODES:Joy Caption Two, Joy Caption Two Advanced, Joy Caption Two Load, Joy Caption Extra Options"
+version = "0.0.8"
+license = {file = "LICENSE"}
+dependencies = ["transformers>=4.44.0", "numpy", "sentencepiece", "pillow>=10.1.0", "bitsandbytes>=0.44.1", "peft==0.12.0"]
+
+[project.urls]
+Repository = "https://github.com/lxy12306/ComfyUI_JoyCaptionTwo_Smell.git"
+
+[tool.comfy]
+PublisherId = "sherlockbt"
+DisplayName = "ComfyUI_smell_joy_caption_two"
+Icon = ""
