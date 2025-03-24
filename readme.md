@@ -38,6 +38,8 @@ pip install -r ComfyUI_JoyCaptionTwo_Smell\requirements.txt
 
 国内：[hf/google/siglip-so400m-patch14-384](https://hf-mirror.com/google/siglip-so400m-patch14-384)
 
+实验性，国外：[google/siglip-so400m-patch14-384](https://huggingface.co/google/siglip2-so400m-patch14-384)
+
 会自动下载，也可以手动下载整个仓库，并把siglip-so400m-patch14-384内的文件全部复制到`models/clip/siglip-so400m-patch14-384`
 ![image](./examples/clip.png)
 #### 2. Llama3.1-8B-Instruct 模型下载

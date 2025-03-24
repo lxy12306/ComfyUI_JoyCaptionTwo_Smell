@@ -3,6 +3,7 @@ import time
 
 import numpy as np
 from torch import nn
+
 from transformers import AutoModel, AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast, \
     AutoModelForCausalLM
 from pathlib import Path
@@ -10,17 +11,17 @@ import torch
 import torch.amp.autocast_mode
 from PIL import Image
 import os
+import torchvision.transforms.functional as TVF
 
 import comfy.model_management
 import comfy.utils
-import torchvision.transforms.functional as TVF
-
 from comfy.model_management import get_torch_device, get_free_memory
-
 from comfy.model_management import load_models_gpu, text_encoder_dtype
 from comfy.model_patcher import ModelPatcher
-from .uitls import load_hg_model, modify_json_value, clear_cache
+
 from .joy_config import joy_config
+from .common.clip import ClipModel
+from .common.uitls import *
 
 DEVICE = get_torch_device()
 
@@ -28,23 +29,13 @@ def tensor2pil(t_image: torch.Tensor)  -> Image:
     return Image.fromarray(np.clip(255.0 * t_image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
 
 class JoyClipVisionModel:
-    def __init__(self, base_model_path, load_device, offload_device):
+    def __init__(self, base_model_path, load_device, offload_device, use_new_model=False):
         self.joy_caption_two_path = Path(base_model_path, "Joy_caption_two")
         self.load_device = load_device
         self.offload_device = offload_device
         self.type = text_encoder_dtype()
 
-        # clip
-        model_id = "google/siglip-so400m-patch14-384"
-        CLIP_PATH = load_hg_model(model_id, base_model_path, "clip")
-
-        clip_model = AutoModel.from_pretrained(
-            CLIP_PATH,
-            trust_remote_code=True,
-            torch_dtype=self.type
-        )
-
-        clip_model = clip_model.vision_model
+        clip_model = ClipModel(base_model_path, self.type).load_clip_model(use_new_model, True)
 
         assert (self.joy_caption_two_path / "clip_model.pt").exists()
         checkpoint = torch.load(self.joy_caption_two_path / "clip_model.pt", map_location='cpu', weights_only=True)
@@ -64,9 +55,6 @@ class JoyClipVisionModel:
         #print(f"之后 in JoyClipVisionModel: {next(self.model.parameters()).device}")  # 打印模型参数的设备
         vision_outputs = self.model(pixel_values=pixel_values, output_hidden_states=True)
         return vision_outputs
-
-
-
 
 class ImageAdapter(nn.Module):
     def __init__(self, input_features: int, output_features: int, ln1: bool, pos_emb: bool, num_image_tokens: int, deep_extract: bool):
@@ -225,9 +213,9 @@ class JoyTwoPipeline:
         self.image_adapter = None
         self.model = None
 
-    def loadModels(self):
+    def loadModels(self, use_new_clip_model=False):
         # clip
-        self.clip_model = JoyClipVisionModel(self.base_model_path, self.load_device, self.offload_device)
+        self.clip_model = JoyClipVisionModel(self.base_model_path, self.load_device, self.offload_device, use_new_clip_model)
 
         self.image_adapter = JoyImageAdapter(self.base_model_path, self.load_device, self.offload_device)
 
@@ -244,17 +232,19 @@ class Joy_caption_two_load:
         self.model = None
         self.load_device = comfy.model_management.text_encoder_device()
         self.offload_device = comfy.model_management.text_encoder_offload_device()
-        self.pipeline : JoyTwoPipeline | None = None  
+        self.pipeline : JoyTwoPipeline | None = None
+        self.use_new_clip_model = False
 
 
     @classmethod
     def INPUT_TYPES(s):
         models = joy_config["model"]
-        
+
         return {
             "required": {
                 "base_model_path":  ("STRING", {"default": "F:\share\model"}),
                 "model": (models, ),
+                "use_new_clip_model": ("BOOLEAN", {"default": False}),
             }
         }
 
@@ -263,12 +253,13 @@ class Joy_caption_two_load:
     FUNCTION = "generate"
 
     def loadModels(self):
-        self.pipeline.loadModels()
+        self.pipeline.loadModels(self.use_new_clip_model)
 
-    def generate(self, base_model_path, model):
+    def generate(self, base_model_path, model, use_new_clip_model):
+        self.use_new_clip_model = use_new_clip_model
         self.pipeline = JoyTwoPipeline(base_model_path, self.load_device, self.offload_device)
         self.pipeline.parent = self
-        if self.model is None or self.model != model or self.pipeline is None:
+        if self.model is None or self.model != model or self.pipeline is None or self.pipeline.clip_model == None:
             self.model = model
             self.loadModels()
         self.pipeline.model = model
@@ -438,7 +429,6 @@ class Joy_caption_two_advanced:
             "required": {
                 "joy_two_pipeline": ("JoyTwoPipeline",),
                 "image": ("IMAGE",),
-                "extra_options": ("Extra_Options", ),
                 "caption_type": (caption_types, {}),
                 "caption_length": (caption_lengths, {"default": "long"}),
                 "name": ("STRING", {"default": ""}),
@@ -446,6 +436,9 @@ class Joy_caption_two_advanced:
                 "low_vram": ("BOOLEAN", {"default": False}),
                 "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "temperature": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 1.0, "step": 0.01}),
+            },
+            "optional": {
+                "extra_options": ("Extra_Options", ),
             }
         }
 
@@ -453,11 +446,11 @@ class Joy_caption_two_advanced:
     RETURN_TYPES = ("STRING",)
     FUNCTION = "generate"
 
-    def generate(self, joy_two_pipeline: JoyTwoPipeline, image, extra_options, caption_type, caption_length, name, custom_prompt, low_vram, top_p, temperature):
+    def generate(self, joy_two_pipeline: JoyTwoPipeline, image, caption_type, caption_length, name, custom_prompt, low_vram, top_p, temperature, extra_options=None):
         torch.cuda.empty_cache()
 
         if joy_two_pipeline.clip_model == None:
-            joy_two_pipeline.parent.loadModels()
+            raise RuntimeError("clip_model 未初始化！请确保在使用 joy_two_pipeline 之前完成模型加载。")
 
         # 'any' means no length specified
         length = None if caption_length == "any" else caption_length
@@ -482,7 +475,7 @@ class Joy_caption_two_advanced:
         prompt_str = list(caption_type_map[caption_type])[map_idx]
 
         # Add extra options
-        if len(extra_options) > 0:
+        if extra_options != None and len(extra_options) > 0:
             prompt_str += " " + " ".join(extra_options)
 
         # Add name, length, word_count
@@ -703,7 +696,7 @@ class Batch_joy_caption_two:
         torch.cuda.empty_cache()
 
         if joy_two_pipeline.clip_model == None:
-            joy_two_pipeline.parent.loadModels()
+            raise RuntimeError("clip_model 未初始化！请确保在使用 joy_two_pipeline 之前完成模型加载。")
 
         # 'any' means no length specified
         length = None if caption_length == "any" else caption_length
@@ -793,7 +786,6 @@ class Batch_joy_caption_two_advanced:
                 "rename": ("BOOLEAN", {"default": False}),
                 "prefix_name": ("STRING", {"default": ""}),
                 "start_index": ("INT", {"default": 1, "min": 0, "max": 9999999, "step": 1}),
-                "extra_options": ("Extra_Options", ),
                 "caption_type": (caption_types, {}),
                 "caption_length": (caption_lengths, {"default": "long"}),
                 "name": ("STRING", {"default": ""}),
@@ -803,6 +795,9 @@ class Batch_joy_caption_two_advanced:
                 "temperature": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "prefix_caption": ("STRING", {"default": ""}),
                 "suffix_caption": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "extra_options": ("Extra_Options", ),
             }
         }
 
@@ -899,12 +894,12 @@ class Batch_joy_caption_two_advanced:
         return caption.strip()
 
     def generate(self, joy_two_pipeline: JoyTwoPipeline, input_dir, output_dir, rename, prefix_name, start_index,
-                 extra_options, caption_type, caption_length, name, custom_prompt, low_vram, top_p, temperature,
-                 prefix_caption, suffix_caption):
+                 caption_type, caption_length, name, custom_prompt, low_vram, top_p, temperature,
+                 prefix_caption, suffix_caption, extra_options=None):
         torch.cuda.empty_cache()
 
         if joy_two_pipeline.clip_model == None:
-            joy_two_pipeline.parent.loadModels()
+            raise RuntimeError("clip_model 未初始化！请确保在使用 joy_two_pipeline 之前完成模型加载。")
 
         # 'any' means no length specified
         length = None if caption_length == "any" else caption_length
@@ -929,7 +924,7 @@ class Batch_joy_caption_two_advanced:
         prompt_str = list(caption_type_map[caption_type])[map_idx]
 
         # Add extra options
-        if len(extra_options) > 0:
+        if extra_options != None and len(extra_options) > 0:
             prompt_str += " " + " ".join(extra_options)
 
         # Add name, length, word_count
@@ -1022,3 +1017,21 @@ class Joy_extra_options:
             if selected:
                 values.append(option)
         return (values, )
+
+NODE_CLASS_MAPPINGS = {
+    "Joy_caption_two": Joy_caption_two,
+    "Joy_caption_two_advanced": Joy_caption_two_advanced,
+    "Batch_joy_caption_two": Batch_joy_caption_two,
+    "Batch_joy_caption_two_advanced": Batch_joy_caption_two_advanced,
+    "Joy_caption_two_load": Joy_caption_two_load,
+    "Joy_extra_options": Joy_extra_options,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "Joy_caption_two": "Joy Caption Two",
+    "Joy_caption_two_advanced": "Joy Caption Two Advanced",
+    "Batch_joy_caption_two": "Batch Joy Caption Two",
+    "Batch_joy_caption_two_advanced": "Batch Joy Caption Two Advanced",
+    "Joy_caption_two_load": "Joy Caption Two Load",
+    "Joy_extra_options": "Joy Caption Extra Options",
+}

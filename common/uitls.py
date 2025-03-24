@@ -1,17 +1,50 @@
 import gc
 import json
 import os
-import folder_paths
+import inspect
+from huggingface_hub import snapshot_download
 
 from comfy.model_management import unload_all_models, soft_empty_cache
 
-def load_hg_model(model_id:str, model_dir:str, exDir:str=''):
-    model_checkpoint = os.path.join(model_dir, exDir, os.path.basename(model_id))
-    print(model_checkpoint)
-    if not os.path.exists(model_checkpoint):
-        raise FileNotFoundError(f"The model checkpoint '{model_checkpoint}' does not exist.") 
-    return model_checkpoint
+def load_hg_model(
+    model_id: str,
+    model_dir: str,
+    exDir: str = '',
+    resume_download: bool = True,
+    proxies: dict = None
+) -> str:
+    """
+    检查指定本地目录下是否存在模型，
+    不存在则从Hugging Face下载，
+    如下载失败则抛出异常。
 
+    :param model_id: Hugging Face模型仓库名或路径 (e.g., 'organization/model_name')
+    :param model_dir: 本地模型根目录
+    :param exDir: 额外子目录
+    :param resume_download: 是否启用断点续传
+    :param proxies: 代理设置，例如 {'http': 'http://...', 'https': 'http://...'}
+    :return: 下载或加载的模型本地路径
+    """
+    model_checkpoint = os.path.join(model_dir, exDir, os.path.basename(model_id))
+
+    if not os.path.exists(model_checkpoint):
+        print(f"本地未找到模型 '{model_checkpoint}'，尝试从 Hugging Face 下载...")
+        try:
+            snapshot_download(
+                repo_id=model_id,
+                local_dir=model_checkpoint,
+                resume_download=resume_download,
+                proxies=proxies,
+                # 如果有需要，可指定分支、标签或提交ID
+                # revision="main",
+            )
+            print(f"模型已成功下载到 '{model_checkpoint}'")
+        except Exception as e:
+            raise RuntimeError(f"从 Hugging Face 下载模型失败，错误信息: {e}")
+    else:
+        print(f"已检测到本地模型目录: {model_checkpoint}")
+
+    return model_checkpoint
 def clear_cache():
     gc.collect()
     unload_all_models()
